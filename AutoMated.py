@@ -11,7 +11,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 # ---------------- FIREBASE SETUP ----------------
-FIREBASE_CRED_PATH = "autonote-f0543-firebase-adminsdk-fbsvc-96fafe3c70.json"
+FIREBASE_CRED_PATH = "Api ke"
 cred = credentials.Certificate(FIREBASE_CRED_PATH)
 try:
     firebase_admin.get_app()

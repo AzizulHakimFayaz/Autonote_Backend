@@ -11,9 +11,130 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 # ---------------- FIREBASE SETUP ----------------
+FIREBASE_CRED_PATH = "autonote-f0543-firebase-adminsdk-fbsvc-96fafe3c70.json"
+cred = credentials.Certificate(FIREBASE_CRED_PATH)
+try:
+    firebase_admin.get_app()
+except ValueError:
+    firebase_admin.initialize_app(cred)
+
+db = firestore.client()
+notes_collection = db.collection("notes")
+users_collection = db.collection("users")
+tokens_collection = db.collection("tokens")  # Simple token store
+
+# ---------------- CONFIG ----------------
+API_KEY = "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"
 
 
+# ---------------- UTILS ----------------
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
 
+
+def generate_token() -> str:
+    return secrets.token_hex(32)
+
+
+# ---------------- FASTAPI ----------------
+app = FastAPI(title="AutoNote AI Backend", version="4.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------- DEPENDENCIES ----------------
+async def get_current_user(authorization: str = Header(None)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    # Format: "Bearer <token>"
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Invalid Authorization header format")
+
+    token = parts[1]
+
+    # Verify token in Firestore
+    # Ideally use Redis or JWT, but Firestore is fine for this scale
+    token_doc = tokens_collection.document(token).get()
+
+    if not token_doc.exists:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    data = token_doc.to_dict()
+    # Simple expiry check (e.g. 30 days)
+    expires = datetime.fromisoformat(data["expires"])
+    if datetime.utcnow() > expires:
+        tokens_collection.document(token).delete()
+        raise HTTPException(status_code=401, detail="Token expired")
+
+    return data["user_id"]  # Return the User ID (email)
+
+
+# ---------------- AI HELPER ----------------
+def call_ai(note_text, existing):
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    prompt = f"""
+You are an AI that organizes notes.
+Existing notes:
+{json.dumps(existing, indent=2)}
+New note:
+"{note_text}"
+Decide if this new note should MERGE with an existing note or CREATE a new one.
+Respond with ONLY valid JSON:
+{{
+ "action": "merge" or "create",
+ "title": "Concise title",
+ "merge_with": null or "Existing Note Title",
+ "summary": "Short summary",
+ "tags": ["tag1", "tag2"],
+ "reasoning": "Explain why merge or create"
+}}
+"""
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1
+    }
+    try:
+        response = requests.post(url, json=body, headers=headers, timeout=10)
+        data = response.json()
+        if "error" in data: raise Exception(data["error"])
+        text = data["choices"][0]["message"]["content"]
+        clean = text.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean)
+    except Exception as e:
+        return {
+            "action": "create",
+            "title": "New Note",
+            "merge_with": None,
+            "summary": note_text[:120],
+            "tags": ["general"],
+            "reasoning": f"AI failed: {str(e)}"
+        }
+
+
+def note_helper(doc):
+    data = doc.to_dict() or {}
+    return {
+        "id": doc.id,
+        "title": data.get("title", "Untitled"),
+        "summary": data.get("summary", "No summary."),
+        "tags": data.get("tags", []),
+        "content": data.get("content", []),
+        "created_at": data.get("created_at", ""),
+        "updated_at": data.get("updated_at", ""),
+        "user_id": data.get("user_id", ""),
+    }
 # ---------------- AUTH ROUTES ----------------
 
 @app.post("/api/auth/signup")
